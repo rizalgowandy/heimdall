@@ -1,9 +1,11 @@
 package hystrix
 
 import (
+	"net/http"
 	"sync"
+	"time"
 
-	metricCollector "github.com/afex/hystrix-go/hystrix/metric_collector"
+	metricCollector "github.com/gojek/hystrix-go/hystrix/metric_collector"
 )
 
 type simpleMetricCollector struct {
@@ -81,4 +83,14 @@ func (r *simpleMetricRegistry) Register(name string) metricCollector.MetricColle
 	collector := newSimpleMetricCollector(name)
 	r.collectors[name] = collector
 	return collector
+}
+
+type delayedCancelDoer struct {
+	Delay time.Duration
+}
+
+func (d delayedCancelDoer) Do(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	time.Sleep(d.Delay)
+	return nil, r.Context().Err()
 }

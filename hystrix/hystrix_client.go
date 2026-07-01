@@ -1,47 +1,47 @@
 package hystrix
 
 import (
-	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"slices"
 	"time"
 
-	"github.com/afex/hystrix-go/hystrix"
-	metricCollector "github.com/afex/hystrix-go/hystrix/metric_collector"
-	"github.com/afex/hystrix-go/plugins"
-	"github.com/gojek/heimdall/v7"
-	"github.com/gojek/heimdall/v7/httpclient"
-	"github.com/pkg/errors"
+	"github.com/gojek/heimdall/v8"
+	"github.com/gojek/heimdall/v8/httpclient"
+	"github.com/gojek/heimdall/v8/internal"
+	"github.com/gojek/hystrix-go/hystrix"
 )
 
 type fallbackFunc func(error) error
+type fallbackCtxFunc func(context.Context, error) error
 
 // Client is the hystrix client implementation
 type Client struct {
 	client *httpclient.Client
 
-	timeout                time.Duration
 	hystrixTimeout         time.Duration
 	hystrixCommandName     string
 	maxConcurrentRequests  int
 	requestVolumeThreshold int
-	sleepWindow            int
+	sleepWindow            time.Duration
 	errorPercentThreshold  int
-	retryCount             int
-	retrier                heimdall.Retriable
 	fallbackFunc           func(ctx context.Context, err error) error
-	statsD                 *plugins.StatsdCollectorConfig
+
+	retrier          heimdall.Retriable
+	retryCount       int
+	retryableCodes   []int
+	retryErrorBudget *internal.ErrorBudget
 }
 
 const (
 	defaultHystrixRetryCount      = 0
-	defaultHTTPTimeout            = 30 * time.Second
 	defaultHystrixTimeout         = 30 * time.Second
 	defaultMaxConcurrentRequests  = 100
 	defaultErrorPercentThreshold  = 25
-	defaultSleepWindow            = 10
+	defaultSleepWindow            = 500 * time.Millisecond
 	defaultRequestVolumeThreshold = 10
 
 	maxUint = ^uint(0)
@@ -49,13 +49,12 @@ const (
 )
 
 var _ heimdall.Client = (*Client)(nil)
-var err5xx = errors.New("server returned 5xx status code")
+var errRetryableCode = errors.New("server returned status code to retry")
 
 // NewClient returns a new instance of hystrix Client
 func NewClient(opts ...Option) *Client {
 	client := Client{
 		client:                 httpclient.NewClient(),
-		timeout:                defaultHTTPTimeout,
 		hystrixTimeout:         defaultHystrixTimeout,
 		maxConcurrentRequests:  defaultMaxConcurrentRequests,
 		errorPercentThreshold:  defaultErrorPercentThreshold,
@@ -69,20 +68,11 @@ func NewClient(opts ...Option) *Client {
 		opt(&client)
 	}
 
-	if client.statsD != nil {
-		c, err := plugins.InitializeStatsdCollector(client.statsD)
-		if err != nil {
-			panic(err)
-		}
-
-		metricCollector.Registry.Register(c.NewStatsdCollector)
-	}
-
 	hystrix.ConfigureCommand(client.hystrixCommandName, hystrix.CommandConfig{
 		Timeout:                durationToInt(client.hystrixTimeout, time.Millisecond),
 		MaxConcurrentRequests:  client.maxConcurrentRequests,
 		RequestVolumeThreshold: client.requestVolumeThreshold,
-		SleepWindow:            client.sleepWindow,
+		SleepWindow:            durationToInt(client.sleepWindow, time.Millisecond),
 		ErrorPercentThreshold:  client.errorPercentThreshold,
 	})
 
@@ -106,7 +96,7 @@ func (hhc *Client) Get(url string, headers http.Header) (*http.Response, error) 
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return response, errors.Wrap(err, "GET - request creation failed")
+		return response, fmt.Errorf("GET %s - request creation failed: %w", hhc.hystrixCommandName, err)
 	}
 
 	request.Header = headers
@@ -119,7 +109,7 @@ func (hhc *Client) Post(url string, body io.Reader, headers http.Header) (*http.
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "POST - request creation failed")
+		return response, fmt.Errorf("POST %s - request creation failed: %w", hhc.hystrixCommandName, err)
 	}
 
 	request.Header = headers
@@ -132,7 +122,7 @@ func (hhc *Client) Put(url string, body io.Reader, headers http.Header) (*http.R
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPut, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "PUT - request creation failed")
+		return response, fmt.Errorf("PUT %s - request creation failed: %w", hhc.hystrixCommandName, err)
 	}
 
 	request.Header = headers
@@ -145,7 +135,7 @@ func (hhc *Client) Patch(url string, body io.Reader, headers http.Header) (*http
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPatch, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "PATCH - request creation failed")
+		return response, fmt.Errorf("PATCH %s - request creation failed: %w", hhc.hystrixCommandName, err)
 	}
 
 	request.Header = headers
@@ -158,7 +148,7 @@ func (hhc *Client) Delete(url string, headers http.Header) (*http.Response, erro
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
-		return response, errors.Wrap(err, "DELETE - request creation failed")
+		return response, fmt.Errorf("DELETE %s - request creation failed: %w", hhc.hystrixCommandName, err)
 	}
 
 	request.Header = headers
@@ -168,54 +158,83 @@ func (hhc *Client) Delete(url string, headers http.Header) (*http.Response, erro
 
 // Do makes an HTTP request with the native `http.Do` interface
 func (hhc *Client) Do(request *http.Request) (*http.Response, error) {
-	var response *http.Response
+	if origReqBody := request.Body; origReqBody != nil {
+		defer func() {
+			// close the original request body as internal.SetRequestGetBody wraps body with noop closer.
+			_ = origReqBody.Close()
+		}()
+	}
+
+	var reqGetBody internal.RequestGetBody
 	var err error
-
-	var bodyReader *bytes.Reader
-
-	if request.Body != nil {
-		reqData, err := ioutil.ReadAll(request.Body)
-		if err != nil {
+	// Only SetRequestGetBody if retry is enabled to avoid unnecessary overhead for non-retry requests
+	if hhc.retryCount > 0 {
+		if err := internal.SetRequestGetBody(request); err != nil {
 			return nil, err
 		}
-		bodyReader = bytes.NewReader(reqData)
-		request.Body = ioutil.NopCloser(bodyReader) // prevents closing the body between retries
+		// keeping a local variable just in case request.GetBody gets overridden by some plugins/middlewares
+		reqGetBody = request.GetBody
 	}
 
+	var response *http.Response
 	for i := 0; i <= hhc.retryCount; i++ {
 		if response != nil {
-			response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
 		}
 
-		err = hystrix.DoC(request.Context(), hhc.hystrixCommandName, func(_ context.Context) error {
-			response, err = hhc.client.Do(request)
-			if bodyReader != nil {
-				// Reset the body reader after the request since at this point it's already read
-				// Note that it's safe to ignore the error here since the 0,0 position is always valid
-				_, _ = bodyReader.Seek(0, 0)
-			}
-
+		if i > 0 {
+			err = internal.SleepInterruptible(request.Context(), hhc.retrier.NextInterval(i-1))
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			if response.StatusCode >= http.StatusInternalServerError {
-				return err5xx
+			request, err = internal.CloneRequest(request, reqGetBody) // Clone the request to reset the body for retry
+			if err != nil {
+				return nil, err
 			}
-			return nil
-		}, hhc.fallbackFunc)
-
-		if err != nil {
-			backoffTime := hhc.retrier.NextInterval(i)
-			time.Sleep(backoffTime)
-			continue
 		}
 
-		break
+		response, err = hhc.hystrixDo(request)
+		if err == nil || internal.IsCtxDone(request.Context()) {
+			_ = hhc.retryErrorBudget.Success()
+			break
+		}
+
+		if hhc.retryErrorBudget.Failure() {
+			break
+		}
 	}
 
-	if err == err5xx {
-		return response, nil
+	if err != nil {
+		if errors.Is(err, errRetryableCode) {
+			return response, nil
+		}
+
+		return nil, err
+	}
+
+	return response, nil
+}
+
+func (hhc *Client) hystrixDo(request *http.Request) (*http.Response, error) {
+	var response *http.Response
+	err := hystrix.DoC(request.Context(), hhc.hystrixCommandName, func(_ context.Context) error {
+		resp, doErr := hhc.client.Do(request)
+		if doErr != nil {
+			return doErr
+		}
+		response = resp
+
+		if _, ok := slices.BinarySearch(hhc.retryableCodes, response.StatusCode); ok ||
+			response.StatusCode >= http.StatusInternalServerError {
+			return errRetryableCode
+		}
+
+		return nil
+	}, hhc.fallbackFunc)
+	if err != nil && !errors.Is(err, errRetryableCode) { // Special handling to avoid data race conditions
+		return nil, err
 	}
 
 	return response, err

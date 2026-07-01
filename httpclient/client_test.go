@@ -2,20 +2,26 @@ package httpclient
 
 import (
 	"bytes"
-	"io/ioutil"
+	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gojek/heimdall/v7"
+	"github.com/gojek/heimdall/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 func TestHTTPClientDoSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -39,12 +45,14 @@ func TestHTTPClientDoSuccess(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, response.StatusCode)
 
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
 }
 
 func TestHTTPClientGetSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +79,8 @@ func TestHTTPClientGetSuccess(t *testing.T) {
 }
 
 func TestHTTPClientPostSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	requestBodyString := `{ "name": "heimdall" }`
@@ -80,7 +90,7 @@ func TestHTTPClientPostSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -106,6 +116,8 @@ func TestHTTPClientPostSuccess(t *testing.T) {
 }
 
 func TestHTTPClientDeleteSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +144,8 @@ func TestHTTPClientDeleteSuccess(t *testing.T) {
 }
 
 func TestHTTPClientPutSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	requestBodyString := `{ "name": "heimdall" }`
@@ -141,7 +155,7 @@ func TestHTTPClientPutSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -167,6 +181,8 @@ func TestHTTPClientPutSuccess(t *testing.T) {
 }
 
 func TestHTTPClientPatchSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	requestBodyString := `{ "name": "heimdall" }`
@@ -176,7 +192,7 @@ func TestHTTPClientPatchSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -202,6 +218,8 @@ func TestHTTPClientPatchSuccess(t *testing.T) {
 }
 
 func TestHTTPClientGetRetriesOnFailure(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	noOfRetries := 3
 	noOfCalls := noOfRetries + 1
@@ -251,12 +269,14 @@ func BenchmarkHTTPClientGetRetriesOnFailure(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
 	defer server.Close()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = client.Get(server.URL, http.Header{})
 	}
 }
 
 func TestHTTPClientPostRetriesOnFailure(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	noOfRetries := 3
 	noOfCalls := noOfRetries + 1
@@ -287,6 +307,52 @@ func TestHTTPClientPostRetriesOnFailure(t *testing.T) {
 	assert.Equal(t, noOfCalls, count)
 }
 
+func TestHTTPClientRetriesWithBudgetGetOnFailure5xx(t *testing.T) {
+	t.Parallel()
+
+	count := 0
+	backoffInterval := 1 * time.Millisecond
+	maximumJitterInterval := 1 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithRetryCount(4),
+		WithRetryErrorBudgetToken(100, 0.1),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "response": "something went wrong" }`))
+		count = count + 1
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	for attempt := range 10 { // under budget
+		currCount := count
+		response, err := client.Get(server.URL, http.Header{})
+		require.NoError(t, err)
+
+		assert.Equal(t, 5, count-currCount, "attempt #%d", attempt)
+		assert.NotNil(t, response)
+		assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+		assert.Equal(t, "{ \"response\": \"something went wrong\" }", respBody(t, response))
+	}
+
+	for attempt := range 10 { // over budget, no retry
+		currCount := count
+		response, err := client.Get(server.URL, http.Header{})
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, count-currCount, "attempt #%d", attempt)
+		assert.NotNil(t, response)
+		assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+		assert.Equal(t, "{ \"response\": \"something went wrong\" }", respBody(t, response))
+	}
+}
+
 func BenchmarkHTTPClientPostRetriesOnFailure(b *testing.B) {
 	noOfRetries := 3
 	backoffInterval := 1 * time.Millisecond
@@ -306,12 +372,14 @@ func BenchmarkHTTPClientPostRetriesOnFailure(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
 	defer server.Close()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = client.Post(server.URL, strings.NewReader("a=1"), http.Header{})
 	}
 }
 
 func TestHTTPClientGetReturnsNoErrorsIfRetriesFailWith5xx(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	noOfRetries := 2
 	backoffInterval := 1 * time.Millisecond
@@ -341,6 +409,8 @@ func TestHTTPClientGetReturnsNoErrorsIfRetriesFailWith5xx(t *testing.T) {
 }
 
 func TestHTTPClientGetReturnsNoErrorsIfRetrySucceeds(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	countWhenCallSucceeds := 2
 	backoffInterval := 1 * time.Millisecond
@@ -374,6 +444,8 @@ func TestHTTPClientGetReturnsNoErrorsIfRetrySucceeds(t *testing.T) {
 }
 
 func TestHTTPClientGetReturnsErrorOnClientCallFailure(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -393,6 +465,8 @@ func TestHTTPClientGetReturnsErrorOnClientCallFailure(t *testing.T) {
 }
 
 func TestHTTPClientGetReturnsNoErrorOn5xxFailure(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +484,8 @@ func TestHTTPClientGetReturnsNoErrorOn5xxFailure(t *testing.T) {
 }
 
 func TestHTTPClientGetReturnsErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 
 	response, err := client.Get("url_doenst_exist", http.Header{})
@@ -418,6 +494,8 @@ func TestHTTPClientGetReturnsErrorOnFailure(t *testing.T) {
 }
 
 func TestPluginMethodsCalled(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 	mockPlugin := &MockPlugin{}
 	client.AddPlugin(mockPlugin)
@@ -449,6 +527,8 @@ func TestPluginMethodsCalled(t *testing.T) {
 }
 
 func TestPluginErrorMethodCalled(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(WithHTTPTimeout(10 * time.Millisecond))
 	mockPlugin := &MockPlugin{}
 	client.AddPlugin(mockPlugin)
@@ -457,7 +537,7 @@ func TestPluginErrorMethodCalled(t *testing.T) {
 	mockPlugin.On("OnError", mock.Anything, mock.Anything)
 
 	serverURL := "does_not_exist"
-	_, err := client.Get(serverURL, http.Header{})
+	client.Get(serverURL, http.Header{})
 
 	mockPlugin.AssertNumberOfCalls(t, "OnRequestStart", 1)
 	pluginRequest, ok := mockPlugin.Calls[0].Arguments[0].(*http.Request)
@@ -466,7 +546,7 @@ func TestPluginErrorMethodCalled(t *testing.T) {
 	assert.Equal(t, serverURL, pluginRequest.URL.String())
 
 	mockPlugin.AssertNumberOfCalls(t, "OnError", 1)
-	err, ok = mockPlugin.Calls[1].Arguments[1].(error)
+	err, ok := mockPlugin.Calls[1].Arguments[1].(error)
 	require.True(t, ok)
 	assert.Contains(t, err.Error(), "unsupported protocol scheme")
 }
@@ -481,6 +561,8 @@ func (c *myHTTPClient) Do(request *http.Request) (*http.Response, error) {
 }
 
 func TestCustomHTTPClientHeaderSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
 		WithHTTPClient(&myHTTPClient{
@@ -501,10 +583,43 @@ func TestCustomHTTPClientHeaderSuccess(t *testing.T) {
 	require.NoError(t, err)
 	response, err := client.Do(req)
 	assert.Equal(t, http.StatusOK, response.StatusCode)
+	require.NoError(t, err)
 
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
+}
+
+func TestHTTPClientContextTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(WithHTTPTimeout(1000 * time.Millisecond))
+
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
+
+		time.Sleep(100 * time.Millisecond)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{ "response": "ok" }`))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	ctxt, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctxt, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Language", "en")
+	response, err := client.Do(req)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, &url.Error{Op: "Get", URL: server.URL, Err: context.DeadlineExceeded}, err)
+	require.Nil(t, response)
 }
 
 func respBody(t *testing.T, response *http.Response) string {
@@ -512,8 +627,191 @@ func respBody(t *testing.T, response *http.Response) string {
 		defer response.Body.Close()
 	}
 
-	respBody, err := ioutil.ReadAll(response.Body)
+	respBody, err := io.ReadAll(response.Body)
 	require.NoError(t, err, "should not have failed to read response body")
 
 	return string(respBody)
+}
+
+func TestHTTPClientDoContextCancelledDuringRetry(t *testing.T) {
+	t.Parallel()
+
+	noOfRetries := 3
+	backoffInterval := 100 * time.Millisecond
+	maximumJitterInterval := 10 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithRetryCount(noOfRetries),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	count := atomic.Int32{}
+	count.Store(0)
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		count.Add(1)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	req = req.WithContext(ctx)
+
+	// Cancel the context after a short delay to simulate context cancellation during sleep
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err = client.Do(req)
+	require.Error(t, err)
+	assert.Equal(t, context.Canceled, err)
+	assert.Less(t, count.Load(), int32(noOfRetries+1), "should not have completed all retries due to context cancellation")
+}
+
+func TestHTTPClientDoContextCancelledBeforeRetry(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithRetryCount(3),
+		WithRetrier(heimdall.NewRetrierFunc(func(retry int) time.Duration {
+			assert.Fail(t, "should not have retrier func due to context cancellation")
+			return 0
+		})),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	count := atomic.Int32{}
+	count.Store(0)
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		cancel() // Cancel immediately
+		count.Add(1)
+		<-r.Context().Done() // Wait for cancelation to propagate
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	req = req.WithContext(ctx)
+
+	_, err = client.Do(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(1), count.Load())
+}
+
+func TestHTTPClientDoContextTimeoutDuringRetry(t *testing.T) {
+	t.Parallel()
+
+	noOfRetries := 3
+	backoffInterval := 100 * time.Millisecond
+	maximumJitterInterval := 10 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithRetryCount(noOfRetries),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	count := atomic.Int32{}
+	count.Store(0)
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		count.Add(1)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	req = req.WithContext(ctx)
+
+	_, err = client.Do(req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), context.DeadlineExceeded.Error())
+	assert.Less(t, count.Load(), int32(noOfRetries+1), "should not have completed all retries due to context timeout")
+}
+
+func TestHTTPClientMultiRetryOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	noOfRetries := 3
+	backoffInterval := 4 * time.Millisecond
+	maximumJitterInterval := 2 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(5*time.Millisecond),
+		WithRetryCount(noOfRetries),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(10 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+
+	_, err = client.Do(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	mutliErr, ok := err.(interface{ Unwrap() []error })
+	require.True(t, ok)
+	errs := mutliErr.Unwrap()
+	assert.Len(t, errs, noOfRetries+1)
+	for _, e := range errs {
+		var urlErr *url.Error
+		require.True(t, errors.As(e, &urlErr))
+		assert.Equal(t, "Get", urlErr.Op)
+		assert.Equal(t, server.URL, urlErr.URL)
+		assert.ErrorIs(t, urlErr.Err, context.DeadlineExceeded)
+	}
+}
+
+func TestHTTPClientRetriesOnSpecificStatusCodes(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithRetryableStatusCodes(424, 400),
+		WithRetryCount(3),
+	)
+
+	counter := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		counter++
+		if counter < 2 {
+			w.WriteHeader(http.StatusBadRequest)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_, _ = w.Write([]byte(`{ "response": "ok" }`))
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	response, err := client.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
 }

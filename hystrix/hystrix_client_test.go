@@ -3,14 +3,16 @@ package hystrix
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gojek/heimdall/v7"
+	"github.com/gojek/heimdall/v8"
+	"github.com/gojek/hystrix-go/hystrix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,13 +27,15 @@ func (c *myHTTPClient) Do(request *http.Request) (*http.Response, error) {
 }
 
 func TestHystrixHTTPClientDoSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(50*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v11"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(20),
 	)
 
@@ -56,19 +60,21 @@ func TestHystrixHTTPClientDoSuccess(t *testing.T) {
 	require.NoError(t, err, "should not have failed to make a GET request")
 
 	assert.Equal(t, http.StatusOK, response.StatusCode)
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
 }
 
 func TestHystrixHTTPClientGetSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v1"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
@@ -96,13 +102,15 @@ func TestHystrixHTTPClientGetSuccess(t *testing.T) {
 }
 
 func TestHystrixHTTPClientPostSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v2"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
@@ -113,7 +121,7 @@ func TestHystrixHTTPClientPostSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -139,13 +147,15 @@ func TestHystrixHTTPClientPostSuccess(t *testing.T) {
 }
 
 func TestHystrixHTTPClientDeleteSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v3"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
@@ -173,13 +183,15 @@ func TestHystrixHTTPClientDeleteSuccess(t *testing.T) {
 }
 
 func TestHystrixHTTPClientPutSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v4"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
@@ -190,7 +202,7 @@ func TestHystrixHTTPClientPutSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -216,13 +228,15 @@ func TestHystrixHTTPClientPutSuccess(t *testing.T) {
 }
 
 func TestHystrixHTTPClientPatchSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v5"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
@@ -233,7 +247,7 @@ func TestHystrixHTTPClientPatchSuccess(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "en", r.Header.Get("Accept-Language"))
 
-		rBody, err := ioutil.ReadAll(r.Body)
+		rBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err, "should not have failed to extract request body")
 
 		assert.Equal(t, requestBodyString, string(rBody))
@@ -259,16 +273,18 @@ func TestHystrixHTTPClientPatchSuccess(t *testing.T) {
 }
 
 func TestHystrixHTTPClientRetriesGetOnFailure(t *testing.T) {
+	t.Parallel()
+
 	backoffInterval := 1 * time.Millisecond
 	maximumJitterInterval := 1 * time.Millisecond
 
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v6"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithRetryCount(3),
 		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
@@ -281,6 +297,8 @@ func TestHystrixHTTPClientRetriesGetOnFailure(t *testing.T) {
 }
 
 func TestHystrixHTTPClientRetriesGetOnFailure5xx(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	backoffInterval := 1 * time.Millisecond
 	maximumJitterInterval := 1 * time.Millisecond
@@ -291,7 +309,7 @@ func TestHystrixHTTPClientRetriesGetOnFailure5xx(t *testing.T) {
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithRetryCount(3),
 		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
@@ -311,8 +329,61 @@ func TestHystrixHTTPClientRetriesGetOnFailure5xx(t *testing.T) {
 
 	assert.Equal(t, 4, count)
 
+	assert.NotNil(t, response)
 	assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
 	assert.Equal(t, "{ \"response\": \"something went wrong\" }", respBody(t, response))
+}
+
+func TestHystrixHTTPClientRetriesWithBudgetGetOnFailure5xx(t *testing.T) {
+	t.Parallel()
+
+	count := 0
+	backoffInterval := 1 * time.Millisecond
+	maximumJitterInterval := 1 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(100*time.Millisecond),
+		WithCommandName("some_command_name_5xx_with_budget"),
+		WithHystrixTimeout(100*time.Millisecond),
+		WithMaxConcurrentRequests(100),
+		WithErrorPercentThreshold(25),
+		WithSleepWindow(100*time.Millisecond),
+		WithRequestVolumeThreshold(100),
+		WithRetryCount(4),
+		WithRetryErrorBudgetToken(100, 0.1),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "response": "something went wrong" }`))
+		count = count + 1
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	for attempt := range 10 { // under budget
+		currCount := count
+		response, err := client.Get(server.URL, http.Header{})
+		require.NoError(t, err)
+
+		assert.Equal(t, 5, count-currCount, "attempt #%d", attempt)
+		assert.NotNil(t, response)
+		assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+		assert.Equal(t, "{ \"response\": \"something went wrong\" }", respBody(t, response))
+	}
+
+	for attempt := range 10 { // over budget, no retry
+		currCount := count
+		response, err := client.Get(server.URL, http.Header{})
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, count-currCount, "attempt #%d", attempt)
+		assert.NotNil(t, response)
+		assert.Equal(t, http.StatusInternalServerError, response.StatusCode)
+		assert.Equal(t, "{ \"response\": \"something went wrong\" }", respBody(t, response))
+	}
 }
 
 func BenchmarkHystrixHTTPClientRetriesGetOnFailure(b *testing.B) {
@@ -321,11 +392,11 @@ func BenchmarkHystrixHTTPClientRetriesGetOnFailure(b *testing.B) {
 
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v7"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithRetryCount(3),
 		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
@@ -339,23 +410,25 @@ func BenchmarkHystrixHTTPClientRetriesGetOnFailure(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
 	defer server.Close()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = client.Get(server.URL, http.Header{})
 	}
 }
 
 func TestHystrixHTTPClientRetriesPostOnFailure(t *testing.T) {
+	t.Parallel()
+
 	count := 0
 	backoffInterval := 1 * time.Millisecond
 	maximumJitterInterval := 1 * time.Millisecond
 
 	client := NewClient(
 		WithHTTPTimeout(50*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v8"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(20),
 		WithRetryCount(3),
 		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
@@ -378,17 +451,52 @@ func TestHystrixHTTPClientRetriesPostOnFailure(t *testing.T) {
 	assert.JSONEq(t, `{ "response": "something went wrong" }`, respBody(t, response))
 }
 
+func TestHystrixHTTPClientRetriesPostOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	backoffInterval := 1 * time.Millisecond
+	maximumJitterInterval := 1 * time.Millisecond
+
+	client := NewClient(
+		WithHTTPTimeout(2*time.Millisecond),
+		WithCommandName("some_command_name_v9"),
+		WithHystrixTimeout(time.Millisecond),
+		WithMaxConcurrentRequests(100),
+		WithErrorPercentThreshold(10),
+		WithSleepWindow(100*time.Millisecond),
+		WithRequestVolumeThreshold(20),
+		WithRetryCount(3),
+		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
+	)
+
+	dummyHandler := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Millisecond):
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{ "response": "something" }`))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
+	defer server.Close()
+
+	response, err := client.Post(server.URL, strings.NewReader("a=1&b=2"), http.Header{})
+	require.Equal(t, hystrix.ErrTimeout, err)
+	require.Nil(t, response)
+}
+
 func BenchmarkHystrixHTTPClientRetriesPostOnFailure(b *testing.B) {
 	backoffInterval := 1 * time.Millisecond
 	maximumJitterInterval := 1 * time.Millisecond
 
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v10"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithRetryCount(3),
 		WithRetrier(heimdall.NewRetrier(heimdall.NewConstantBackoff(backoffInterval, maximumJitterInterval))),
@@ -402,34 +510,38 @@ func BenchmarkHystrixHTTPClientRetriesPostOnFailure(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(dummyHandler))
 	defer server.Close()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = client.Post(server.URL, strings.NewReader("a=1&b=2"), http.Header{})
 	}
 }
 
 func TestHystrixHTTPClientReturnsFallbackFailureWithoutFallBackFunction(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
-		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
-		WithHystrixTimeout(10*time.Millisecond),
+		WithHTTPTimeout(time.Second),
+		WithCommandName("some_command_name_without_fallback"),
+		WithHystrixTimeout(time.Second),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 	)
 
 	_, err := client.Get("http://foobar.example", http.Header{})
-	assert.Equal(t, err.Error(), "hystrix: circuit open")
+	assert.Contains(t, err.Error(), "no such host")
 }
 
 func TestHystrixHTTPClientReturnsFallbackFailureWithAFallBackFunctionWhichReturnAnError(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v1"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithFallbackFunc(func(err error) error {
 			// do something in the fallback function
@@ -443,18 +555,40 @@ func TestHystrixHTTPClientReturnsFallbackFailureWithAFallBackFunctionWhichReturn
 	assert.True(t, strings.Contains(err.Error(), "fallback failed"))
 }
 
+func TestHystrixHTTPClientReturnsHTTPFailureWithANilFallBackFunction(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithCommandName("some_command_name_v2"),
+		WithHystrixTimeout(10*time.Millisecond),
+		WithMaxConcurrentRequests(100),
+		WithErrorPercentThreshold(10),
+		WithSleepWindow(100*time.Millisecond),
+		WithRequestVolumeThreshold(10),
+		WithFallbackFunc(nil),
+	)
+
+	_, err := client.Get("", http.Header{})
+	require.Error(t, err, "should have failed")
+
+	assert.Contains(t, err.Error(), "unsupported protocol scheme")
+}
+
 func TestFallBackFunctionIsCalledWithHystrixHTTPClient(t *testing.T) {
+	t.Parallel()
+
 	called := false
 
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v3"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
-		WithFallbackFunc(func(err error) error {
+		WithFallbackCtxFunc(func(ctx context.Context, err error) error {
 			called = true
 			return err
 		}),
@@ -467,15 +601,17 @@ func TestFallBackFunctionIsCalledWithHystrixHTTPClient(t *testing.T) {
 }
 
 func TestHystrixHTTPClientReturnsFallbackFailureWithAFallBackFunctionWhichReturnsNil(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
-		WithCommandName("some_command_name"),
+		WithCommandName("some_command_name_v4"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
-		WithFallbackFunc(func(err error) error {
+		WithFallbackCtxFunc(func(ctx context.Context, err error) error {
 			// do something in the fallback function
 			return nil
 		}),
@@ -486,13 +622,15 @@ func TestHystrixHTTPClientReturnsFallbackFailureWithAFallBackFunctionWhichReturn
 }
 
 func TestCustomHystrixHTTPClientDoSuccess(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(
 		WithHTTPTimeout(10*time.Millisecond),
 		WithCommandName("some_new_command_name"),
 		WithHystrixTimeout(10*time.Millisecond),
 		WithMaxConcurrentRequests(100),
 		WithErrorPercentThreshold(10),
-		WithSleepWindow(100),
+		WithSleepWindow(100*time.Millisecond),
 		WithRequestVolumeThreshold(10),
 		WithHTTPClient(&myHTTPClient{
 			client: http.Client{Timeout: 25 * time.Millisecond}}),
@@ -512,8 +650,9 @@ func TestCustomHystrixHTTPClientDoSuccess(t *testing.T) {
 	require.NoError(t, err)
 	response, err := client.Do(req)
 	assert.Equal(t, http.StatusOK, response.StatusCode)
+	require.NoError(t, err)
 
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
 }
@@ -525,14 +664,18 @@ func respBody(t *testing.T, response *http.Response) string {
 		}()
 	}
 
-	respBody, err := ioutil.ReadAll(response.Body)
+	respBody, err := io.ReadAll(response.Body)
 	require.NoError(t, err, "should not have failed to read response body")
 
 	return string(respBody)
 }
 
 func TestDurationToInt(t *testing.T) {
+	t.Parallel()
+
 	t.Run("1sec should return 1 when unit is second", func(t *testing.T) {
+		t.Parallel()
+
 		timeout := 1 * time.Second
 		timeoutInSec := durationToInt(timeout, time.Second)
 
@@ -540,6 +683,8 @@ func TestDurationToInt(t *testing.T) {
 	})
 
 	t.Run("30sec should return 30000 when unit is millisecond", func(t *testing.T) {
+		t.Parallel()
+
 		timeout := 30 * time.Second
 		timeoutInMs := durationToInt(timeout, time.Millisecond)
 
@@ -548,10 +693,19 @@ func TestDurationToInt(t *testing.T) {
 }
 
 func TestHystrixHTTPClientDoContextCancelled(t *testing.T) {
+	t.Parallel()
+
 	const cmdName = "some_command_name_for_ctx_cncl"
 	r := newSimpleMetricRegistry()
 
-	client := NewClient(WithCommandName(cmdName))
+	client := NewClient(
+		WithHTTPClient(delayedCancelDoer{Delay: 100 * time.Millisecond}), // making sure hystrix pickups context cancel before run failure
+		WithCommandName(cmdName),
+		WithRetryCount(3),
+		WithRetrier(heimdall.NewRetrierFunc(func(retry int) time.Duration {
+			assert.Fail(t, "should not invoke retrier func due to context cancellation")
+			return 0
+		})))
 
 	req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
 	require.NoError(t, err)
@@ -560,12 +714,12 @@ func TestHystrixHTTPClientDoContextCancelled(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	response, err := client.Do(req)
-	require.Equal(t, err, context.Canceled)
+	require.Contains(t, err.Error(), context.Canceled.Error())
 	require.Nil(t, response)
 	time.Sleep(time.Second)
 	m := r.GetMetrics(cmdName)
-	assert.Equal(t, float64(1), m.ContextCanceled)
-	assert.Equal(t, float64(1), m.Attempts)
+	assert.Equal(t, int64(1), m.ContextCanceled)
+	assert.Equal(t, int64(1), m.Attempts)
 	assert.Zero(t, m.Errors)
 	assert.Zero(t, m.Successes)
 	assert.Zero(t, m.Failures)
@@ -575,4 +729,145 @@ func TestHystrixHTTPClientDoContextCancelled(t *testing.T) {
 	assert.Zero(t, m.FallbackSuccesses)
 	assert.Zero(t, m.FallbackFailures)
 	assert.Zero(t, m.ContextDeadlineExceeded)
+}
+
+func TestHystrixHTTPClientDoContextCancelledDuringRetryBackoff(t *testing.T) {
+	t.Parallel()
+
+	const cmdName = "some_command_name_for_ctx_cncl_during_retry"
+	ctx, cnclFN := context.WithCancel(context.Background())
+
+	var retrierFuncCount int
+	var retrierFuncStartTime time.Time
+
+	client := NewClient(
+		WithCommandName(cmdName),
+		WithRetryCount(3),
+		WithRetrier(heimdall.NewRetrierFunc(func(retry int) time.Duration {
+			retrierFuncStartTime = time.Now()
+			retrierFuncCount++
+			cnclFN()
+			return time.Hour
+		})))
+
+	reqCount := atomic.Int32{}
+	reqCount.Store(0)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		reqCount.Add(1)
+		rw.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+
+	response, err := client.Do(req)
+	endTime := time.Now()
+	require.Contains(t, err.Error(), context.Canceled.Error())
+	require.Nil(t, response)
+	assert.Equal(t, int32(1), reqCount.Load())
+	require.Equal(t, 1, retrierFuncCount)
+	assert.Less(t, endTime.Sub(retrierFuncStartTime), time.Millisecond)
+
+	time.Sleep(time.Second)
+}
+
+func TestResponseBodyStreaming(t *testing.T) {
+	t.Parallel()
+
+	const cmdName = "response_body_streamig"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		for range 40 { // streaming data in chunks
+			_, _ = io.WriteString(w, strings.Repeat("x", 1024))
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(WithCommandName(cmdName))
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, 1024*40, len(data))
+}
+
+func TestReqBodyResetForHTTPTimeoutHigherThanHystrix(t *testing.T) {
+	t.Parallel()
+
+	const cmdName = "response_http_timeout_higher"
+	var counter atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := counter.Add(1)
+
+		data, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, strings.Repeat("x", 40*1024), string(data))
+
+		if count < 3 {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(
+		WithCommandName(cmdName),
+		WithHystrixTimeout(5*time.Millisecond),
+		WithRetryCount(5),
+		WithHTTPClient(&http.Client{Timeout: 25 * time.Millisecond}),
+	)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(strings.Repeat("x", 40*1024)))
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, int32(3), counter.Load())
+}
+
+func TestHystrixHTTPClientRetriesOnSpecificStatusCodes(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(
+		WithHTTPTimeout(10*time.Millisecond),
+		WithCommandName("retry_on_specific_status_codes"),
+		WithHystrixTimeout(10*time.Millisecond),
+		WithRetryableStatusCodes(424, 400),
+		WithRetryCount(3),
+	)
+
+	counter := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		counter++
+		if counter < 2 {
+			w.WriteHeader(http.StatusBadRequest)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		_, _ = w.Write([]byte(`{ "response": "ok" }`))
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	response, err := client.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "{ \"response\": \"ok\" }", string(body))
 }

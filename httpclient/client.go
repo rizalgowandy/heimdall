@@ -1,25 +1,27 @@
 package httpclient
 
 import (
-	"bytes"
+	"context"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"slices"
 	"time"
 
-	"github.com/gojek/heimdall/v7"
-	"github.com/gojek/valkyrie"
-	"github.com/pkg/errors"
+	"github.com/gojek/heimdall/v8"
+	"github.com/gojek/heimdall/v8/internal"
 )
 
 // Client is the http client implementation
 type Client struct {
-	client heimdall.Doer
+	client  heimdall.Doer
+	plugins []heimdall.Plugin
+	timeout *time.Duration
 
-	timeout    time.Duration
-	retryCount int
-	retrier    heimdall.Retriable
-	plugins    []heimdall.Plugin
+	retrier          heimdall.Retriable
+	retryCount       int
+	retryableCodes   []int
+	retryErrorBudget *internal.ErrorBudget
 }
 
 const (
@@ -32,7 +34,7 @@ var _ heimdall.Client = (*Client)(nil)
 // NewClient returns a new instance of http Client
 func NewClient(opts ...Option) *Client {
 	client := Client{
-		timeout:    defaultHTTPTimeout,
+		client:     &http.Client{Timeout: defaultHTTPTimeout},
 		retryCount: defaultRetryCount,
 		retrier:    heimdall.NewNoRetrier(),
 	}
@@ -41,11 +43,7 @@ func NewClient(opts ...Option) *Client {
 		opt(&client)
 	}
 
-	if client.client == nil {
-		client.client = &http.Client{
-			Timeout: client.timeout,
-		}
-	}
+	client.updateHTTPTimeout()
 
 	return &client
 }
@@ -60,7 +58,7 @@ func (c *Client) Get(url string, headers http.Header) (*http.Response, error) {
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return response, errors.Wrap(err, "GET - request creation failed")
+		return response, fmt.Errorf("GET - request creation failed: %w", err)
 	}
 
 	request.Header = headers
@@ -73,7 +71,7 @@ func (c *Client) Post(url string, body io.Reader, headers http.Header) (*http.Re
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "POST - request creation failed")
+		return response, fmt.Errorf("POST - request creation failed: %w", err)
 	}
 
 	request.Header = headers
@@ -86,7 +84,7 @@ func (c *Client) Put(url string, body io.Reader, headers http.Header) (*http.Res
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPut, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "PUT - request creation failed")
+		return response, fmt.Errorf("PUT - request creation failed: %w", err)
 	}
 
 	request.Header = headers
@@ -99,7 +97,7 @@ func (c *Client) Patch(url string, body io.Reader, headers http.Header) (*http.R
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodPatch, url, body)
 	if err != nil {
-		return response, errors.Wrap(err, "PATCH - request creation failed")
+		return response, fmt.Errorf("PATCH - request creation failed: %w", err)
 	}
 
 	request.Header = headers
@@ -112,7 +110,7 @@ func (c *Client) Delete(url string, headers http.Header) (*http.Response, error)
 	var response *http.Response
 	request, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
-		return response, errors.Wrap(err, "DELETE - request creation failed")
+		return response, fmt.Errorf("DELETE - request creation failed: %w", err)
 	}
 
 	request.Header = headers
@@ -122,54 +120,85 @@ func (c *Client) Delete(url string, headers http.Header) (*http.Response, error)
 
 // Do makes an HTTP request with the native `http.Do` interface
 func (c *Client) Do(request *http.Request) (*http.Response, error) {
-	var bodyReader *bytes.Reader
-
-	if request.Body != nil {
-		reqData, err := ioutil.ReadAll(request.Body)
-		if err != nil {
-			return nil, err
-		}
-		bodyReader = bytes.NewReader(reqData)
-		request.Body = ioutil.NopCloser(bodyReader) // prevents closing the body between retries
+	if origReqBody := request.Body; origReqBody != nil {
+		defer func() {
+			// close the original request body as internal.SetRequestGetBody wraps body with noop closer.
+			_ = origReqBody.Close()
+		}()
 	}
 
-	multiErr := &valkyrie.MultiError{}
+	var reqGetBody internal.RequestGetBody
+	var err error
+	// Only SetRequestGetBody if retry is enabled to avoid unnecessary overhead for non-retry requests
+	if c.retryCount > 0 {
+		if err = internal.SetRequestGetBody(request); err != nil {
+			return nil, err
+		}
+		// keeping a local variable just in case request.GetBody gets overridden by some plugins/middlewares
+		reqGetBody = request.GetBody
+	}
+
+	var errs []error
 	var response *http.Response
 
 	for i := 0; i <= c.retryCount; i++ {
 		if response != nil {
-			response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+		if i > 0 {
+			if err := internal.SleepInterruptible(request.Context(), c.retrier.NextInterval(i-1)); err != nil {
+				errs = append(errs, err)
+				c.reportError(request, err)
+				// no point of retrying after context has been cancelled
+				break
+			}
+
+			request, err = internal.CloneRequest(request, reqGetBody) // Clone the request to reset the body for retry
+			if err != nil {
+				errs = append(errs, err)
+				c.reportError(request, err)
+				break
+			}
 		}
 
 		c.reportRequestStart(request)
 		var err error
 		response, err = c.client.Do(request)
-		if bodyReader != nil {
-			// Reset the body reader after the request since at this point it's already read
-			// Note that it's safe to ignore the error here since the 0,0 position is always valid
-			_, _ = bodyReader.Seek(0, 0)
-		}
 
 		if err != nil {
-			multiErr.Push(err.Error())
+			errs = append(errs, err)
 			c.reportError(request, err)
-			backoffTime := c.retrier.NextInterval(i)
-			time.Sleep(backoffTime)
+			if c.skipRetry(request.Context()) {
+				break
+			}
 			continue
 		}
 		c.reportRequestEnd(request, response)
 
-		if response.StatusCode >= http.StatusInternalServerError {
-			backoffTime := c.retrier.NextInterval(i)
-			time.Sleep(backoffTime)
+		if _, ok := slices.BinarySearch(c.retryableCodes, response.StatusCode); ok ||
+			response.StatusCode >= http.StatusInternalServerError {
+			if c.skipRetry(request.Context()) {
+				break
+			}
 			continue
 		}
 
-		multiErr = &valkyrie.MultiError{} // Clear errors if any iteration succeeds
+		errs = nil // Clear errors if any iteration succeeds
+		_ = c.retryErrorBudget.Success()
 		break
 	}
 
-	return response, multiErr.HasError()
+	return response, internal.BuildMultiError(errs)
+}
+
+func (c *Client) skipRetry(ctx context.Context) bool {
+	if internal.IsCtxDone(ctx) {
+		_ = c.retryErrorBudget.Success()
+		return true
+	}
+
+	return c.retryErrorBudget.Failure()
 }
 
 func (c *Client) reportRequestStart(request *http.Request) {
@@ -187,5 +216,15 @@ func (c *Client) reportError(request *http.Request, err error) {
 func (c *Client) reportRequestEnd(request *http.Request, response *http.Response) {
 	for _, plugin := range c.plugins {
 		plugin.OnRequestEnd(request, response)
+	}
+}
+
+func (c *Client) updateHTTPTimeout() {
+	if c.timeout == nil {
+		return
+	}
+
+	if client, ok := c.client.(*http.Client); ok && client != nil {
+		client.Timeout = *c.timeout
 	}
 }
